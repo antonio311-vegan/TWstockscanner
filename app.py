@@ -1,5 +1,5 @@
 # ============================================================
-# 🔍 主力進場訊號掃描器 v5（修正 SSL 憑證問題）
+# 🔍 主力進場訊號掃描器 v6（修正假日空資料問題）
 # ============================================================
 
 import streamlit as st
@@ -32,13 +32,18 @@ v2_min       = st.sidebar.slider("訊號三：量比下限",              1.0, 3
 v2_max       = st.sidebar.slider("訊號三：量比上限",              3.0, 8.0, 4.0, 0.5)
 market_opt   = st.sidebar.multiselect("市場", ["上市", "上櫃"], default=["上市", "上櫃"])
 
+# ════════════════════════════════════════════════════════════
+# 工具函數
+# ════════════════════════════════════════════════════════════
+
 def clean_num(series):
     return pd.to_numeric(
         series.astype(str).str.replace(",", "").str.replace(" ", "").str.strip(),
         errors="coerce"
     )
 
-def get_weekdays(n=25):
+def get_weekdays(n=30):
+    """取最近 n 個日曆天中的平日（由新到舊）"""
     dates, d = [], datetime.today()
     for _ in range(n):
         if d.weekday() < 5:
@@ -46,11 +51,16 @@ def get_weekdays(n=25):
         d -= timedelta(days=1)
     return dates
 
+# ════════════════════════════════════════════════════════════
+# 抓資料
+# ════════════════════════════════════════════════════════════
+
 @st.cache_data(ttl=3600)
 def fetch_all_data():
     NEED     = 8
     weekdays = get_weekdays()
 
+    # ── 上市發行股數 ──────────────────────────────────────
     r = requests.get(
         "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
         timeout=15, headers=HEADERS, verify=False
@@ -63,6 +73,7 @@ def fetch_all_data():
     twse_shares["shares"]   = clean_num(twse_shares["shares"])
     twse_shares = twse_shares.dropna().query("shares > 0").reset_index(drop=True)
 
+    # ── 上市每日資料 ──────────────────────────────────────
     twse_frames = []
     for d in weekdays:
         url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=json&date={d}"
@@ -80,6 +91,10 @@ def fetch_all_data():
             break
         time.sleep(0.6)
 
+    # ── 上市資料為空的處理 ────────────────────────────────
+    if not twse_frames:
+        raise ValueError("TWSE_EMPTY")
+
     twse_raw = pd.concat(twse_frames, ignore_index=True)
     twse_raw = twse_raw.rename(columns={
         "證券代號": "stock_id", "證券名稱": "stock_name",
@@ -95,6 +110,7 @@ def fetch_all_data():
     twse = twse.query("volume>0 and shares>0 and close>0").copy()
     twse["turnover_rate"] = (twse["volume"] / twse["shares"]) * 100
 
+    # ── 上櫃每日資料 ──────────────────────────────────────
     TPEX_COLS = [
         "stock_id","stock_name","close_str","change",
         "open_str","high","low","vol_str","amount","trades",
@@ -123,6 +139,9 @@ def fetch_all_data():
             break
         time.sleep(0.6)
 
+    if not tpex_frames:
+        raise ValueError("TPEX_EMPTY")
+
     tpex_raw = pd.concat(tpex_frames, ignore_index=True)
     tpex_raw["stock_id"] = tpex_raw["stock_id"].str.strip()
     tpex_raw["volume"]   = clean_num(tpex_raw["vol_str"])
@@ -139,6 +158,10 @@ def fetch_all_data():
     df = pd.concat([twse[KEEP], tpex[KEEP]], ignore_index=True)
     df = df.sort_values(["stock_id","date"]).reset_index(drop=True)
     return df
+
+# ════════════════════════════════════════════════════════════
+# 三訊號掃描
+# ════════════════════════════════════════════════════════════
 
 def run_scan(df, t1, t2_min, t2_mult, v_min, v_max, markets):
     latest  = df["date"].max()
@@ -183,11 +206,33 @@ def run_scan(df, t1, t2_min, t2_mult, v_min, v_max, markets):
         rdf = rdf.sort_values("週轉率倍數", ascending=False).reset_index(drop=True)
     return rdf, latest
 
+# ════════════════════════════════════════════════════════════
+# 執行按鈕
+# ════════════════════════════════════════════════════════════
+
+# 顯示今天是否為交易日
+today     = datetime.today()
+weekday_zh = ["一","二","三","四","五","六","日"]
+is_weekday = today.weekday() < 5
+
+if not is_weekday:
+    st.warning(
+        f"⚠️ 今天是星期{weekday_zh[today.weekday()]}（非交易日）。"
+        f"掃描結果將以**最近一個交易日**為基準。"
+    )
+
 if st.button("🚀 開始掃描", type="primary", use_container_width=True):
     with st.spinner("📡 抓取 TWSE / TPEX 資料中，約需 60～90 秒..."):
         try:
             df = fetch_all_data()
-            st.success(f"✅ 資料載入完成：{df['stock_id'].nunique()} 檔 × {df['date'].nunique()} 天")
+            latest_available = df["date"].max().strftime("%Y-%m-%d")
+            st.success(f"✅ 資料載入完成：{df['stock_id'].nunique()} 檔 × {df['date'].nunique()} 天（最新交易日：{latest_available}）")
+        except ValueError as e:
+            if "EMPTY" in str(e):
+                st.error("❌ 抓不到交易資料，可能原因：今日為假日或連假，TWSE/TPEX 尚未更新資料。請於交易日收盤後（下午 2:00 後）執行。")
+            else:
+                st.error(f"❌ 資料抓取失敗：{e}")
+            st.stop()
         except Exception as e:
             st.error(f"❌ 資料抓取失敗：{e}")
             st.stop()
@@ -223,6 +268,6 @@ if st.button("🚀 開始掃描", type="primary", use_container_width=True):
             use_container_width=True
         )
     else:
-        st.info("今日無符合條件的股票，可調整左側參數後重新掃描")
+        st.info("此交易日無符合三條件的股票，可調整左側參數後重新掃描")
 else:
     st.info("👈 調整左側參數後，按「開始掃描」")
