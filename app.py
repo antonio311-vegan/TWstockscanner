@@ -479,14 +479,14 @@ with col2:
     if sr is not None and len(sr) > 0:
         s_counts = sr["信號"].value_counts().to_dict()
     total_sword = sum(s_counts.values())
-    st  = st.session_state.sword_time or "—"
+    sword_t = st.session_state.sword_time or "—"
 
     st.markdown(f"""
 <div class="strategy-card orange">
   <div class="card-label">STRATEGY 02</div>
   <div class="card-title">⚔️ 三刀流（60分K）</div>
   <div style="color:var(--dim);font-size:0.8em;margin-bottom:10px;">🟠240MA 🟢60MA 🔵20MA 均線信號</div>
-  <div style="font-size:0.75em;color:var(--dim);">最後掃描：{st}</div>
+  <div style="font-size:0.75em;color:var(--dim);">最後掃描：{sword_t}</div>
   <div class="card-stat">
     <div class="stat-item">
       <div class="stat-num" style="color:var(--accent2);">{s_counts.get('🔴 三刀做多',0)}</div>
