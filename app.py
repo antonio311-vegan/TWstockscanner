@@ -586,8 +586,8 @@ force_t = st.session_state.force_time
 sword_t_val = st.session_state.sword_time
 limit_t = st.session_state.limit_time
 
-force_cnt = len(fr) if fr is not None and len(fr)>0 else 0
-sword_cnt = len(sr) if sr is not None and len(sr)>0 else 0
+force_cnt = (len(fr) if fr is not None and not fr.empty else 0)
+sword_cnt = (len(sr) if sr is not None and not sr.empty else 0)
 s_counts  = sr["信號"].value_counts().to_dict() if sr is not None and len(sr)>0 else {}
 lim70     = len(lr[lr["評分"]>=70]) if lr is not None and len(lr)>0 else 0
 lim_hit   = len(lr[lr["已漲停"]=="🚨 是"]) if lr is not None and len(lr)>0 and "已漲停" in lr.columns else 0
@@ -725,21 +725,24 @@ if do_force or do_sword or do_limit:
             with st.spinner(f"🎯 {label}..."):
                 run_scan_force(df_hist)
             if scan_all:
-                with p1: st.success(f"✅ 主力訊號完成　{len(st.session_state.force_result)} 檔")
+                with p1:
+                    _fr=st.session_state.force_result; st.success(f"✅ 主力訊號完成　{0 if _fr is None else len(_fr)} 檔")
 
         if do_sword:
             label = "2/3 三刀流" if scan_all else "掃描三刀流"
             st.markdown(f"**⚔️ {label}（上市前250檔，約3～5分鐘）**")
             run_scan_sword()
             if scan_all:
-                with p2: st.success(f"✅ 三刀流完成　{len(st.session_state.sword_result or [])} 檔")
+                with p2:
+                    _sr=st.session_state.sword_result; st.success(f"✅ 三刀流完成　{0 if _sr is None else len(_sr)} 檔")
 
         if do_limit and df_hist is not None:
             label = "3/3 漲停獵手" if scan_all else "掃描漲停獵手"
             with st.spinner(f"🎯 {label}..."):
                 run_scan_limit(df_hist)
             if scan_all:
-                with p3: st.success(f"✅ 漲停獵手完成　{len(st.session_state.limit_result or [])} 檔")
+                with p3:
+                    _lr=st.session_state.limit_result; st.success(f"✅ 漲停獵手完成　{0 if _lr is None else len(_lr)} 檔")
 
     st.rerun()
 
