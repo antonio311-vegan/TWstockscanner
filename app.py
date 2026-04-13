@@ -1,5 +1,5 @@
 # ============================================================
-# 🔍 主力進場訊號掃描器 v9（修正 TPEX 被擋問題）
+# 🔍 主力進場訊號掃描器 v10（修正 TPEX 欄位對應）
 # ============================================================
 
 import streamlit as st
@@ -12,7 +12,6 @@ from datetime import datetime, timedelta
 warnings.filterwarnings("ignore")
 requests.packages.urllib3.disable_warnings()
 
-# TPEX 需要完整 headers 才不會被擋
 HEADERS_TWSE = {"User-Agent": "Mozilla/5.0"}
 HEADERS_TPEX = {
     "User-Agent"      : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0",
@@ -48,9 +47,12 @@ if st.sidebar.button("🗑️ 清除快取重新抓資料"):
 # 工具函數
 # ════════════════════════════════════════════════════════════
 
-def clean_num(series):
+def clean_num(s):
+    """安全轉數值，處理 Series 或純值"""
+    if isinstance(s, pd.DataFrame):
+        s = s.iloc[:, 0]
     return pd.to_numeric(
-        series.astype(str).str.replace(",", "").str.replace(" ", "").str.strip(),
+        pd.Series(s).astype(str).str.replace(",", "").str.replace(" ", "").str.strip(),
         errors="coerce"
     )
 
@@ -63,60 +65,118 @@ def get_weekdays(n=30):
     return dates
 
 # ════════════════════════════════════════════════════════════
-# TPEX 抓取（session + 完整 headers）
+# TPEX：session 方式（舊 API）
 # ════════════════════════════════════════════════════════════
 
-def fetch_tpex_day(session, d, log):
+TPEX_COLS = [
+    "stock_id","stock_name","close_str","change",
+    "open_str","high","low","vol_str","amount","trades",
+    "bid_p","bid_v","ask_p","ask_v","shares_str","limit_up","limit_down"
+]
+
+def fetch_tpex_session(session, d, log):
     dt  = datetime.strptime(d, "%Y%m%d")
     roc = f"{dt.year-1911}/{dt.month:02d}/{dt.day:02d}"
-
-    # 先訪問首頁取得 cookies
     try:
-        session.get("https://www.tpex.org.tw/", timeout=10, verify=False)
+        session.get("https://www.tpex.org.tw/", timeout=8, verify=False)
     except:
         pass
-
-    url = (
-        "https://www.tpex.org.tw/web/stock/aftertrading/"
-        f"all_daily_info/mpsas_result.php?l=zh-tw&o=json&d={roc}&s=0,asc"
-    )
-    resp = session.get(url, timeout=15, verify=False)
-    raw  = resp.text.strip()
-
-    if not raw or raw[0] not in "[{":
-        # 嘗試備用 URL 格式
-        url2 = (
-            "https://www.tpex.org.tw/web/stock/aftertrading/"
-            f"all_daily_info/mpsas_result.php?l=zh-tw&o=json&d={roc}"
-        )
-        resp = session.get(url2, timeout=15, verify=False)
-        raw  = resp.text.strip()
-
-    if not raw or raw[0] not in "[{":
-        log.append(f"  TPEX {d}：空白回應（{len(raw)} chars）")
-        return None
-
-    data = resp.json()
-    rows = data.get("aaData") or data.get("data") or []
-    log.append(f"  TPEX {d}：{len(rows)} 筆")
-    return rows
+    for url in [
+        f"https://www.tpex.org.tw/web/stock/aftertrading/all_daily_info/mpsas_result.php?l=zh-tw&o=json&d={roc}&s=0,asc",
+        f"https://www.tpex.org.tw/web/stock/aftertrading/all_daily_info/mpsas_result.php?l=zh-tw&o=json&d={roc}",
+    ]:
+        try:
+            resp = session.get(url, timeout=15, verify=False)
+            raw  = resp.text.strip()
+            if raw and raw[0] in "[{":
+                data = resp.json()
+                rows = data.get("aaData") or data.get("data") or []
+                log.append(f"  Session {d}：{len(rows)} 筆")
+                return rows
+        except:
+            pass
+    log.append(f"  Session {d}：空白回應")
+    return []
 
 # ════════════════════════════════════════════════════════════
-# TPEX OpenAPI（備援方案）
+# TPEX：OpenAPI（備援）
+# 欄位：SecuritiesCompanyCode, CompanyName, Close, Open,
+#        TradeVolume(千股), IssuedShares(千股)
 # ════════════════════════════════════════════════════════════
 
 def fetch_tpex_openapi(d, log):
     dt  = datetime.strptime(d, "%Y%m%d")
     roc = f"{dt.year-1911}/{dt.month:02d}/{dt.day:02d}"
-    url = f"https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes?date={roc}"
-    resp = requests.get(url, timeout=15, headers=HEADERS_TPEX, verify=False)
-    raw  = resp.text.strip()
-    if not raw or raw[0] not in "[{":
-        log.append(f"  TPEX OpenAPI {d}：空白（{len(raw)} chars）")
+    for url in [
+        f"https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes?date={roc}&charset=UTF-8",
+        f"https://openapi.tpex.org.tw/v1/tpex_mainboard_daily_close_quotes?date={roc}",
+    ]:
+        try:
+            resp = requests.get(url, timeout=15, headers=HEADERS_TPEX, verify=False)
+            raw  = resp.text.strip()
+            if raw and raw[0] in "[{":
+                data = resp.json()
+                if isinstance(data, list) and len(data) > 10:
+                    log.append(f"  OpenAPI {d}：{len(data)} 筆，欄位={list(data[0].keys())[:6]}")
+                    return data
+        except Exception as e:
+            log.append(f"  OpenAPI {d}：{e}")
+    log.append(f"  OpenAPI {d}：失敗")
+    return []
+
+def openapi_to_df(rows, d, log):
+    """將 TPEX OpenAPI rows 轉成標準 DataFrame"""
+    df = pd.DataFrame(rows)
+    if df.empty:
         return None
-    data = resp.json()
-    log.append(f"  TPEX OpenAPI {d}：{len(data)} 筆")
-    return data
+    cols = list(df.columns)
+    log.append(f"  OpenAPI 全欄位：{cols}")
+
+    # TPEX OpenAPI 標準欄位對應
+    FIELD_MAP = {
+        # 股票代號
+        "SecuritiesCompanyCode": "stock_id",
+        "Code": "stock_id",
+        # 公司名稱
+        "CompanyName": "stock_name",
+        "Name": "stock_name",
+        # 收盤
+        "Close": "close_str",
+        "ClosingPrice": "close_str",
+        # 開盤
+        "Open": "open_str",
+        "OpeningPrice": "open_str",
+        # 成交千股
+        "TradeVolume": "vol_str",
+        "TradingShares": "vol_str",
+        # 發行千股
+        "IssuedShares": "shares_str",
+        "ListedShares": "shares_str",
+    }
+    rename = {k: v for k, v in FIELD_MAP.items() if k in cols}
+    df = df.rename(columns=rename)
+
+    # 去掉重複欄位（保留第一個）
+    df = df.loc[:, ~df.columns.duplicated()]
+
+    required = ["stock_id","stock_name","close_str","open_str","vol_str","shares_str"]
+    missing  = [c for c in required if c not in df.columns]
+    if missing:
+        log.append(f"  ⚠️ 缺少欄位：{missing}，現有：{list(df.columns)}")
+        return None
+
+    df["date"]     = pd.to_datetime(d, format="%Y%m%d")
+    df["stock_id"] = df["stock_id"].astype(str).str.strip()
+    df["volume"]   = clean_num(df["vol_str"])
+    df["shares"]   = clean_num(df["shares_str"])
+    df["open"]     = clean_num(df["open_str"])
+    df["close"]    = clean_num(df["close_str"])
+    df["market"]   = "上櫃"
+    df = df.dropna(subset=["volume","shares","open","close"])
+    df = df.query("volume>0 and shares>0 and close>0").copy()
+    # OpenAPI 單位為千股，兩者相除單位相消
+    df["turnover_rate"] = (df["volume"] / df["shares"]) * 100
+    return df
 
 # ════════════════════════════════════════════════════════════
 # 主要資料抓取
@@ -141,7 +201,7 @@ def fetch_all_data():
     twse_shares["stock_id"] = twse_shares["stock_id"].str.strip()
     twse_shares["shares"] = clean_num(twse_shares["shares"])
     twse_shares = twse_shares.dropna().query("shares > 0").reset_index(drop=True)
-    log.append(f"【TWSE】發行股數：{len(twse_shares)} 檔")
+    log.append(f"【TWSE 發行股數】{len(twse_shares)} 檔")
 
     # ── 上市每日資料 ──────────────────────────────────────
     twse_frames = []
@@ -178,87 +238,28 @@ def fetch_all_data():
     twse = twse.dropna(subset=["volume","shares","open","close"])
     twse = twse.query("volume>0 and shares>0 and close>0").copy()
     twse["turnover_rate"] = (twse["volume"] / twse["shares"]) * 100
-    log.append(f"【TWSE】整合完成：{twse['stock_id'].nunique()} 檔 ✅")
+    log.append(f"【TWSE 整合】{twse['stock_id'].nunique()} 檔 ✅")
 
-    # ── 上櫃每日資料（session 方式）──────────────────────
-    log.append("【TPEX】嘗試 Session 方式...")
-    TPEX_COLS = [
-        "stock_id","stock_name","close_str","change",
-        "open_str","high","low","vol_str","amount","trades",
-        "bid_p","bid_v","ask_p","ask_v","shares_str","limit_up","limit_down"
-    ]
-
+    # ── 上櫃：先試 Session，再試 OpenAPI ─────────────────
+    log.append("【TPEX Session】")
     tpex_session = requests.Session()
     tpex_session.headers.update(HEADERS_TPEX)
     tpex_frames  = []
 
     for d in weekdays:
-        try:
-            rows = fetch_tpex_day(tpex_session, d, log)
-            if rows and len(rows) > 50:
-                n  = len(rows[0])
-                df = pd.DataFrame(rows, columns=TPEX_COLS[:n])
-                df["date"] = pd.to_datetime(d, format="%Y%m%d")
-                tpex_frames.append(df)
-        except Exception as e:
-            log.append(f"  TPEX {d}：{e}")
+        rows = fetch_tpex_session(tpex_session, d, log)
+        if len(rows) > 50:
+            n  = len(rows[0])
+            df = pd.DataFrame(rows, columns=TPEX_COLS[:n])
+            df["date"] = pd.to_datetime(d, format="%Y%m%d")
+            tpex_frames.append(df)
         if len(tpex_frames) >= NEED:
             break
         time.sleep(0.5)
 
-    # ── 備援：TPEX OpenAPI ────────────────────────────────
-    if not tpex_frames:
-        log.append("【TPEX】Session 失敗，改用 OpenAPI...")
-        openapi_frames = []
-        for d in weekdays:
-            try:
-                data = fetch_tpex_openapi(d, log)
-                if data and len(data) > 50:
-                    df = pd.DataFrame(data)
-                    df["date"] = pd.to_datetime(d, format="%Y%m%d")
-                    openapi_frames.append(df)
-                    if len(openapi_frames) == 1:
-                        log.append(f"  欄位：{list(df.columns)}")
-            except Exception as e:
-                log.append(f"  OpenAPI {d}：{e}")
-            if len(openapi_frames) >= NEED:
-                break
-            time.sleep(0.5)
-
-        if openapi_frames:
-            tpex_api = pd.concat(openapi_frames, ignore_index=True)
-            # 自動對應欄位
-            rename = {}
-            for c in tpex_api.columns:
-                cl = c.lower()
-                if "code" in cl or "id" in cl:     rename[c] = "stock_id"
-                elif "name" in cl:                  rename[c] = "stock_name"
-                elif "close" in cl:                 rename[c] = "close_str"
-                elif "open" in cl:                  rename[c] = "open_str"
-                elif "volume" in cl or "qty" in cl: rename[c] = "vol_str"
-                elif "issue" in cl or "share" in cl:rename[c] = "shares_str"
-            tpex_api = tpex_api.rename(columns=rename)
-            tpex_api["stock_id"] = tpex_api["stock_id"].astype(str).str.strip()
-            tpex_api["volume"]   = clean_num(tpex_api.get("vol_str",    pd.Series(dtype=str)))
-            tpex_api["shares"]   = clean_num(tpex_api.get("shares_str", pd.Series(dtype=str)))
-            tpex_api["open"]     = clean_num(tpex_api.get("open_str",   pd.Series(dtype=str)))
-            tpex_api["close"]    = clean_num(tpex_api.get("close_str",  pd.Series(dtype=str)))
-            tpex_api["market"]   = "上櫃"
-            tpex_api = tpex_api.dropna(subset=["volume","shares","open","close"])
-            tpex_api = tpex_api.query("volume>0 and shares>0 and close>0").copy()
-            tpex_api["turnover_rate"] = (tpex_api["volume"] / tpex_api["shares"]) * 100
-            tpex_final = tpex_api
-            log.append(f"【TPEX】OpenAPI 整合：{tpex_api['stock_id'].nunique()} 檔 ✅")
-        else:
-            warnings_out.append("上櫃（TPEX）資料暫時無法取得，本次只掃描上市股票")
-            log.append("【TPEX】兩種方式均失敗，跳過上櫃")
-            KEEP = ["stock_id","stock_name","date","open","close",
-                    "volume","shares","turnover_rate","market"]
-            df = twse[KEEP].copy().sort_values(["stock_id","date"]).reset_index(drop=True)
-            return df, log, warnings_out
-    else:
+    if tpex_frames:
         tpex_raw = pd.concat(tpex_frames, ignore_index=True)
-        tpex_raw["stock_id"] = tpex_raw["stock_id"].str.strip()
+        tpex_raw["stock_id"] = tpex_raw["stock_id"].astype(str).str.strip()
         tpex_raw["volume"]   = clean_num(tpex_raw["vol_str"])
         tpex_raw["shares"]   = clean_num(tpex_raw["shares_str"])
         tpex_raw["open"]     = clean_num(tpex_raw["open_str"])
@@ -267,7 +268,30 @@ def fetch_all_data():
         tpex_final = tpex_raw.dropna(subset=["volume","shares","open","close"])
         tpex_final = tpex_final.query("volume>0 and shares>0 and close>0").copy()
         tpex_final["turnover_rate"] = (tpex_final["volume"] / tpex_final["shares"]) * 100
-        log.append(f"【TPEX】Session 整合：{tpex_final['stock_id'].nunique()} 檔 ✅")
+        log.append(f"【TPEX Session 整合】{tpex_final['stock_id'].nunique()} 檔 ✅")
+    else:
+        log.append("【TPEX OpenAPI 備援】")
+        openapi_dfs = []
+        for d in weekdays:
+            rows = fetch_tpex_openapi(d, log)
+            if rows:
+                df = openapi_to_df(rows, d, log)
+                if df is not None and len(df) > 50:
+                    openapi_dfs.append(df)
+            if len(openapi_dfs) >= NEED:
+                break
+            time.sleep(0.5)
+
+        if openapi_dfs:
+            tpex_final = pd.concat(openapi_dfs, ignore_index=True)
+            log.append(f"【TPEX OpenAPI 整合】{tpex_final['stock_id'].nunique()} 檔 ✅")
+        else:
+            warnings_out.append("上櫃（TPEX）資料暫時無法取得，本次只掃描上市股票")
+            log.append("【TPEX】兩種方式均失敗，跳過上櫃")
+            KEEP = ["stock_id","stock_name","date","open","close",
+                    "volume","shares","turnover_rate","market"]
+            df = twse[KEEP].copy().sort_values(["stock_id","date"]).reset_index(drop=True)
+            return df, log, warnings_out
 
     KEEP = ["stock_id","stock_name","date","open","close",
             "volume","shares","turnover_rate","market"]
@@ -357,6 +381,9 @@ if st.button("🚀 開始掃描", type="primary", use_container_width=True):
             st.stop()
         except Exception as e:
             st.error(f"❌ {e}")
+            import traceback
+            with st.expander("🔍 詳細錯誤"):
+                st.text(traceback.format_exc())
             st.stop()
 
     with st.spinner("🔍 執行三訊號掃描..."):
